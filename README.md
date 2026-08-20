@@ -75,7 +75,7 @@ src/
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/community-pulse.git
+git clone https://github.com/Y0505/community-pulse.git
 cd community-pulse
 
 # Install dependencies
