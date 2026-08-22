@@ -13,6 +13,9 @@ import { logger } from "./utils/logger.js";
 import pingCommand from "./commands/ping.js";
 import serverCommand from "./commands/server.js";
 import setupCommand from "./commands/setup.js";
+import communitySummaryCommand from "./commands/community-summary.js";
+import unansweredCommand from "./commands/unanswered.js";
+import communityHealthCommand from "./commands/community-health.js";
 import type { Command, BotEvent } from "./types/index.js";
 
 // Event modules
@@ -28,7 +31,14 @@ import guildMemberAddEvent from "./events/guildMemberAdd.js";
 
 const SCOPE = "Main";
 
-const commands: Command[] = [pingCommand, serverCommand, setupCommand];
+const commands: Command[] = [
+  pingCommand,
+  serverCommand,
+  setupCommand,
+  communitySummaryCommand,
+  unansweredCommand,
+  communityHealthCommand,
+];
 
 const events: BotEvent[] = [readyEvent, interactionCreateEvent, guildMemberAddEvent];
 

@@ -16,10 +16,20 @@ import { logger } from "./utils/logger.js";
 import pingCommand from "./commands/ping.js";
 import serverCommand from "./commands/server.js";
 import setupCommand from "./commands/setup.js";
+import communitySummaryCommand from "./commands/community-summary.js";
+import unansweredCommand from "./commands/unanswered.js";
+import communityHealthCommand from "./commands/community-health.js";
 
 const SCOPE = "DeployCommands";
 
-const commands = [pingCommand.data.toJSON(), serverCommand.data.toJSON(), setupCommand.data.toJSON()];
+const commands = [
+  pingCommand.data.toJSON(),
+  serverCommand.data.toJSON(),
+  setupCommand.data.toJSON(),
+  communitySummaryCommand.data.toJSON(),
+  unansweredCommand.data.toJSON(),
+  communityHealthCommand.data.toJSON(),
+];
 
 async function deploy(): Promise<void> {
   const rest = new REST({ version: "10" }).setToken(env.DISCORD_TOKEN);
