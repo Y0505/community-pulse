@@ -17,6 +17,15 @@ import type { Command } from "../types/index.js";
 import { requireGeminiKey, getAnalysisHours } from "../config/env.js";
 import { runFullAnalysis } from "../services/analytics/CommunityAnalyzer.js";
 
+/** Discord embed field value limit. */
+const FIELD_LIMIT = 1024;
+
+/** Safely truncate a string to fit a Discord embed field. */
+function truncate(value: string, limit = FIELD_LIMIT): string {
+  if (value.length <= limit) return value;
+  return value.slice(0, limit - 1) + "…";
+}
+
 const communityHealthCommand: Command = {
   data: new SlashCommandBuilder()
     .setName("community-health")
@@ -24,6 +33,14 @@ const communityHealthCommand: Command = {
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   async execute(context) {
+    // Runtime permission check (defense in depth — Discord also enforces this)
+    if (!context.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
+      await context.ephemeralReply({
+        content: "⚠️ You need the **Manage Server** permission to use this command.",
+      });
+      return;
+    }
+
     // Check Gemini API key before deferring
     try {
       requireGeminiKey();
@@ -35,10 +52,7 @@ const communityHealthCommand: Command = {
       return;
     }
 
-    await context.reply({
-      content: "🩺 Computing community health score…",
-      ephemeral: true,
-    });
+    await context.deferReply(true);
 
     const hoursBack = getAnalysisHours();
     const result = await runFullAnalysis(context.member.guild, hoursBack);
@@ -94,7 +108,7 @@ const communityHealthCommand: Command = {
     if (health.explanation) {
       embed.addFields({
         name: "🤖 Analysis",
-        value: health.explanation,
+        value: truncate(health.explanation),
       });
     }
 

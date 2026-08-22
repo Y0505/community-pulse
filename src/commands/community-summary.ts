@@ -14,6 +14,15 @@ import type { Command } from "../types/index.js";
 import { requireGeminiKey, getAnalysisHours } from "../config/env.js";
 import { runFullAnalysis } from "../services/analytics/CommunityAnalyzer.js";
 
+/** Discord embed field value limit. */
+const FIELD_LIMIT = 1024;
+
+/** Safely truncate a string to fit a Discord embed field. */
+function truncate(value: string, limit = FIELD_LIMIT): string {
+  if (value.length <= limit) return value;
+  return value.slice(0, limit - 1) + "…";
+}
+
 const communitySummaryCommand: Command = {
   data: new SlashCommandBuilder()
     .setName("community-summary")
@@ -21,6 +30,14 @@ const communitySummaryCommand: Command = {
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   async execute(context) {
+    // Runtime permission check (defense in depth — Discord also enforces this)
+    if (!context.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
+      await context.ephemeralReply({
+        content: "⚠️ You need the **Manage Server** permission to use this command.",
+      });
+      return;
+    }
+
     // Check Gemini API key before deferring
     try {
       requireGeminiKey();
@@ -33,10 +50,7 @@ const communitySummaryCommand: Command = {
     }
 
     // Defer the reply since analysis takes time
-    await context.reply({
-      content: "🔍 Analyzing community activity… This may take a moment.",
-      ephemeral: true,
-    });
+    await context.deferReply(true);
 
     const hoursBack = getAnalysisHours();
     const result = await runFullAnalysis(context.member.guild, hoursBack);
@@ -99,7 +113,7 @@ const communitySummaryCommand: Command = {
       if (result.analysis.insight) {
         embed.addFields({
           name: "💡 Insight",
-          value: result.analysis.insight,
+          value: truncate(result.analysis.insight),
         });
       }
 
@@ -112,7 +126,7 @@ const communitySummaryCommand: Command = {
             return `${icon} ${i.description}`;
           })
           .join("\n");
-        embed.addFields({ name: "⚠️ Attention Needed", value: issueLines });
+        embed.addFields({ name: "⚠️ Attention Needed", value: truncate(issueLines) });
       }
     }
 

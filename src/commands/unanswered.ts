@@ -15,6 +15,15 @@ import type { Command } from "../types/index.js";
 import { requireGeminiKey, getAnalysisHours } from "../config/env.js";
 import { runFullAnalysis } from "../services/analytics/CommunityAnalyzer.js";
 
+/** Discord embed field value limit. */
+const FIELD_LIMIT = 1024;
+
+/** Safely truncate a string to fit a Discord embed field. */
+function truncate(value: string, limit = FIELD_LIMIT): string {
+  if (value.length <= limit) return value;
+  return value.slice(0, limit - 1) + "…";
+}
+
 const unansweredCommand: Command = {
   data: new SlashCommandBuilder()
     .setName("unanswered")
@@ -22,6 +31,14 @@ const unansweredCommand: Command = {
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   async execute(context) {
+    // Runtime permission check (defense in depth — Discord also enforces this)
+    if (!context.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
+      await context.ephemeralReply({
+        content: "⚠️ You need the **Manage Server** permission to use this command.",
+      });
+      return;
+    }
+
     // Check Gemini API key before deferring
     try {
       requireGeminiKey();
@@ -33,10 +50,7 @@ const unansweredCommand: Command = {
       return;
     }
 
-    await context.reply({
-      content: "🔍 Scanning recent messages for unanswered questions…",
-      ephemeral: true,
-    });
+    await context.deferReply(true);
 
     const hoursBack = getAnalysisHours();
     const result = await runFullAnalysis(context.member.guild, hoursBack);
@@ -86,16 +100,19 @@ const unansweredCommand: Command = {
       const fieldParts: string[] = [];
       fieldParts.push(`> ${q.text.slice(0, 200)}`);
       fieldParts.push("");
-      fieldParts.push(`Asked by: **${q.author}** · ${q.channel}`);
+
+      // Format timestamp for display
+      const timeDisplay = formatTimestamp(q.timestamp);
+      fieldParts.push(`Asked by: **${q.author}** · <#${q.channel}> · ${timeDisplay}`);
 
       if (q.suggestedAnswer) {
         fieldParts.push("");
-        fieldParts.push(`🤖 *Suggested answer: ${q.suggestedAnswer.slice(0, 200)}*`);
+        fieldParts.push(`🤖 *AI suggestion (not sent automatically): ${q.suggestedAnswer.slice(0, 200)}*`);
       }
 
       embed.addFields({
         name: "❓ Unanswered",
-        value: fieldParts.join("\n"),
+        value: truncate(fieldParts.join("\n")),
       });
     }
 
@@ -119,5 +136,17 @@ const unansweredCommand: Command = {
     await context.editReply({ content: undefined, embeds: [embed] });
   },
 };
+
+/** Format an ISO timestamp into a short Discord-friendly display. */
+function formatTimestamp(iso: string): string {
+  try {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "unknown";
+    const epoch = Math.floor(date.getTime() / 1000);
+    return `<t:${epoch}:R>`; // Discord relative timestamp (e.g. "2 hours ago")
+  } catch {
+    return "unknown";
+  }
+}
 
 export default unansweredCommand;

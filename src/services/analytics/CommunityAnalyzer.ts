@@ -10,7 +10,7 @@ import type { Guild } from "discord.js";
 import { collectMessages, formatForAI } from "./MessageCollector.js";
 import { analyzeMessages, explainHealth } from "../ai/AIService.js";
 import { calculateHealthScore, formatScoreForAI } from "./HealthScorer.js";
-import type { CommunityAnalysisResult, HealthScore } from "../ai/types.js";
+import type { CommunityAnalysisResult, HealthScore, PreparedMessage } from "../ai/types.js";
 import { logger } from "../../utils/logger.js";
 
 const SCOPE = "CommunityAnalyzer";
@@ -106,36 +106,41 @@ export async function runFullAnalysis(
     health.explanation = generateFallbackExplanation(health);
   }
 
-  // Build the final analysis result
+  // Build the final analysis result, enriching timestamps from collected messages
   const analysis: CommunityAnalysisResult | null = aiResult
-    ? {
-        insight: aiResult.insight,
-        topics: aiResult.topics.map((t) => ({
-          ...t,
-          messageCount: Math.max(1, t.messageCount),
-        })),
-        trendingTopics: aiResult.topics.filter((t) => t.trending),
-        questions: aiResult.questions.map((q) => ({
-          text: q.text,
-          author: q.author,
-          channel: q.channel,
-          answered: q.answered,
-          suggestedAnswer: q.suggestedAnswer,
-        })),
-        unansweredQuestions: aiResult.questions
-          .filter((q) => !q.answered)
-          .map((q) => ({
+    ? ((): CommunityAnalysisResult => {
+        const refined = refineUnansweredStatus(aiResult.questions, input.messages);
+        return {
+          insight: aiResult.insight,
+          topics: aiResult.topics.map((t) => ({
+            ...t,
+            messageCount: Math.max(1, t.messageCount),
+          })),
+          trendingTopics: aiResult.topics.filter((t) => t.trending),
+          questions: refined.map((q) => ({
             text: q.text,
             author: q.author,
             channel: q.channel,
-            answered: false,
+            timestamp: findTimestamp(q.text, q.channel, input.messages),
+            answered: q.answered,
             suggestedAnswer: q.suggestedAnswer,
           })),
-        importantIssues: aiResult.importantIssues.map((i) => ({
-          description: i.description,
-          severity: i.severity,
-        })),
-      }
+          unansweredQuestions: refined
+            .filter((q) => !q.answered)
+            .map((q) => ({
+              text: q.text,
+              author: q.author,
+              channel: q.channel,
+              timestamp: findTimestamp(q.text, q.channel, input.messages),
+              answered: false,
+              suggestedAnswer: q.suggestedAnswer,
+            })),
+          importantIssues: aiResult.importantIssues.map((i) => ({
+            description: i.description,
+            severity: i.severity,
+          })),
+        };
+      })()
     : null;
 
   return {
@@ -151,6 +156,70 @@ export async function runFullAnalysis(
  * Fallback explanation when the AI is unavailable.
  * Uses simple rules based on the health score.
  */
+/**
+ * Attempt to find a timestamp for a question by matching it against
+ * collected messages. Uses simple substring matching — not perfect,
+ * but better than having no timestamp at all.
+ */
+function findTimestamp(
+  questionText: string,
+  channel: string,
+  messages: PreparedMessage[],
+): string {
+  const lower = questionText.toLowerCase();
+  const channelMessages = messages.filter((m) => m.channel === channel);
+
+  for (const msg of channelMessages) {
+    if (msg.text.toLowerCase().includes(lower.slice(0, 50))) {
+      return msg.timestamp;
+    }
+  }
+  return new Date().toISOString();
+}
+
+/** Common patterns that indicate a response to a question. */
+const RESPONSE_INDICATORS = /^(yes|no|check|try|look|see|here|sure|use|go to|see the|read the| documentation| docs)/i;
+
+/**
+ * Local heuristic: re-evaluate whether a question is truly unanswered.
+ *
+ * After the AI classifies questions, this checks the surrounding
+ * messages for responses that the AI might have missed. A question
+ * is considered answered if a message from a *different* author
+ * follows it within 3 messages and starts with a response pattern.
+ *
+ * This is a lightweight safety net — it doesn't replace the AI
+ * classification but catches obvious missed responses.
+ */
+function refineUnansweredStatus(
+  questions: Array<{ text: string; author: string; channel: string; answered: boolean; suggestedAnswer?: string }>,
+  messages: PreparedMessage[],
+): Array<{ text: string; author: string; channel: string; answered: boolean; suggestedAnswer?: string }> {
+  return questions.map((q) => {
+    if (q.answered) return q;
+
+    const lower = q.text.toLowerCase().slice(0, 80);
+    const channelMessages = messages.filter((m) => m.channel === q.channel);
+
+    // Find the question's approximate position
+    const qIndex = channelMessages.findIndex(
+      (m) => m.author === q.author && m.text.toLowerCase().includes(lower.slice(0, 40)),
+    );
+
+    if (qIndex === -1) return q;
+
+    // Check the next 3 messages for a response from a different author
+    const nearby = channelMessages.slice(qIndex + 1, qIndex + 4);
+    for (const msg of nearby) {
+      if (msg.author !== q.author && RESPONSE_INDICATORS.test(msg.text.trim())) {
+        return { ...q, answered: true };
+      }
+    }
+
+    return q;
+  });
+}
+
 function generateFallbackExplanation(health: HealthScore): string {
   if (health.overall >= 80) {
     return "Community health is strong. Activity levels and engagement are good.";

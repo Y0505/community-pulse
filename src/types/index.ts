@@ -26,6 +26,8 @@ export interface CommandContext {
   member: GuildMember;
   /** The guild ID where the command was invoked. */
   guildId: string;
+  /** Defer the reply for long-running operations (shows 'thinking…'). */
+  deferReply: (ephemeral?: boolean) => Promise<void>;
   /** Reply helpers for the interaction. */
   reply: (options: InteractionReplyOptions) => Promise<Message | void>;
   /** Edit the original deferred reply. */

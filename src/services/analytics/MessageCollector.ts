@@ -31,6 +31,20 @@ const MAX_PER_CHANNEL = 200;
 /** Maximum text length for a single prepared message. */
 const MAX_MESSAGE_TEXT_LENGTH = 300;
 
+/** Discord epoch offset in milliseconds (2015-01-01T00:00:00Z). */
+const DISCORD_EPOCH_MS = 1_420_070_400_000;
+
+/**
+ * Convert a Date to a Discord snowflake ID.
+ * Discord snowflakes encode timestamps — this lets us use the `after`
+ * parameter correctly to filter messages by time.
+ */
+function dateToSnowflake(date: Date): string {
+  const ms = date.getTime() - DISCORD_EPOCH_MS;
+  const snowflake = BigInt(ms) << 22n;
+  return snowflake.toString();
+}
+
 /**
  * Collect recent messages from all accessible text channels in a guild.
  *
@@ -41,6 +55,7 @@ export async function collectMessages(
   hoursBack: number,
 ): Promise<AnalysisInput> {
   const since = new Date(Date.now() - hoursBack * 60 * 60 * 1000);
+  const afterSnowflake = dateToSnowflake(since);
   const timeRange = `last ${hoursBack} hour${hoursBack === 1 ? "" : "s"}`;
 
   const textChannels = guild.channels.cache.filter(
@@ -66,7 +81,7 @@ export async function collectMessages(
 
       const messages = await channel.messages.fetch({
         limit,
-        after: since.toISOString(),
+        after: afterSnowflake,
       });
 
       allMessages.push(...messages.values());
@@ -104,6 +119,7 @@ function prepareMessage(msg: Message): PreparedMessage {
     channel: msg.channel.type === ChannelType.GuildText ? msg.channel.name : "unknown",
     author: msg.member?.displayName ?? msg.author.displayName ?? "unknown",
     text: msg.content.slice(0, MAX_MESSAGE_TEXT_LENGTH),
+    timestamp: msg.createdAt.toISOString(),
     time: formatTime(msg.createdTimestamp),
   };
 }

@@ -45,6 +45,10 @@ function buildContext(interaction: ChatInputCommandInteraction): CommandContext 
     member,
     guildId: interaction.guildId ?? "",
 
+    async deferReply(ephemeral = false): Promise<void> {
+      await interaction.deferReply({ ephemeral });
+    },
+
     async reply(options: {
       content?: string;
       embeds?: import("discord.js").EmbedBuilder[];

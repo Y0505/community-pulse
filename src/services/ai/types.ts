@@ -24,6 +24,8 @@ export interface DetectedQuestion {
   author: string;
   /** Channel name where the question was posted. */
   channel: string;
+  /** ISO timestamp of when the question was posted. */
+  timestamp: string;
   /** Whether someone responded meaningfully. */
   answered: boolean;
   /** AI-suggested answer, only if the question is unanswered. */
@@ -72,7 +74,9 @@ export interface PreparedMessage {
   author: string;
   /** Message text, truncated to a reasonable length. */
   text: string;
-  /** Approximate timestamp. */
+  /** ISO timestamp string. */
+  timestamp: string;
+  /** Approximate time display (HH:MM). */
   time: string;
 }
 
@@ -100,6 +104,7 @@ export interface GeminiAnalysisResponse {
     text: string;
     author: string;
     channel: string;
+    timestamp?: string;
     answered: boolean;
     suggestedAnswer?: string;
   }>;

@@ -104,7 +104,12 @@ export function formatScoreForAI(score: HealthScore, data: HealthInput): string 
  * Good engagement: 0.1-1 messages per member per hour.
  */
 function calculateEngagement(messageCount: number, memberCount: number, hours: number): number {
-  if (memberCount === 0 || hours === 0) return 0;
+  if (hours <= 0) return 0;
+  if (memberCount <= 0) {
+    // No member data available — use message volume alone as a rough signal
+    // 100+ messages = decent engagement, scale accordingly
+    return clamp(messageCount / 100, 0, 100);
+  }
 
   const msgsPerMemberPerHour = messageCount / (memberCount * hours);
 
@@ -161,6 +166,7 @@ function calculateActivity(messages: PreparedMessage[]): number {
     }
   }
 
+  // If we couldn't parse any timestamps, give a neutral score
   if (buckets.size === 0) return 50;
 
   const counts = Array.from(buckets.values());
@@ -173,7 +179,7 @@ function calculateActivity(messages: PreparedMessage[]): number {
   const evenness = min / max;
 
   // Scale to 0-100 with a floor so even small activity gets some score
-  return 30 + evenness * 70;
+  return clamp(30 + evenness * 70, 0, 100);
 }
 
 /** Parse "HH:MM" time string to hour (0-23), or -1 on failure. */

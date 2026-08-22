@@ -163,16 +163,37 @@ export async function analyzeCommunity(
     parsed.questions = parsed.questions.slice(0, 50);
     parsed.importantIssues = parsed.importantIssues.slice(0, 10);
 
-    // Validate and sanitize each question
+    // Sanitize insight text
+    parsed.insight = parsed.insight.slice(0, 1000);
+
+    // Validate and sanitize topics
+    parsed.topics = parsed.topics
+      .filter((t) => typeof t.name === "string")
+      .map((t) => ({
+        name: t.name.slice(0, 100),
+        messageCount: Math.max(1, Math.min(10000, Math.round(Number(t.messageCount) || 1))),
+        trending: Boolean(t.trending),
+      }));
+
+    // Validate and sanitize questions
     parsed.questions = parsed.questions
       .filter((q) => typeof q.text === "string" && typeof q.author === "string" && typeof q.channel === "string")
       .map((q) => ({
-        ...q,
         text: q.text.slice(0, 500),
         author: q.author.slice(0, 50),
         channel: q.channel.slice(0, 50),
+        timestamp: typeof q.timestamp === "string" ? q.timestamp : undefined,
         answered: Boolean(q.answered),
         suggestedAnswer: typeof q.suggestedAnswer === "string" ? q.suggestedAnswer.slice(0, 500) : undefined,
+      }));
+
+    // Validate and sanitize important issues with strict severity validation
+    const VALID_SEVERITIES = new Set(["low", "medium", "high"]);
+    parsed.importantIssues = parsed.importantIssues
+      .filter((i) => typeof i.description === "string")
+      .map((i) => ({
+        description: i.description.slice(0, 300),
+        severity: VALID_SEVERITIES.has(i.severity) ? i.severity : "low",
       }));
 
     logger.info(SCOPE, `Analysis complete: ${parsed.topics.length} topics, ${parsed.questions.length} questions`);
