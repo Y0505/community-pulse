@@ -114,7 +114,3 @@ export interface GeminiAnalysisResponse {
   }>;
 }
 
-/** Raw JSON schema expected from Gemini for health explanation. */
-export interface GeminiHealthResponse {
-  explanation: string;
-}

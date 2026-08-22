@@ -11,7 +11,7 @@
  * - Timeout management
  */
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenerativeAI, GoogleGenerativeAIAbortError } from "@google/generative-ai";
 import { requireGeminiKey } from "../../config/env.js";
 import { logger } from "../../utils/logger.js";
 import type { GeminiAnalysisResponse } from "./types.js";
@@ -138,12 +138,12 @@ export async function analyzeCommunity(
 
     const prompt = buildAnalysisPrompt(inputSummary);
 
-    const result = await Promise.race([
-      model.generateContent(prompt),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Gemini request timed out")), REQUEST_TIMEOUT_MS),
-      ),
-    ]);
+    // Use the SDK's built-in timeout rather than Promise.race.
+    // The SDK creates an AbortController internally and cancels the
+    // fetch when the timeout fires.
+    const result = await model.generateContent(prompt, {
+      timeout: REQUEST_TIMEOUT_MS,
+    });
 
     const text = result.response.text();
     if (!text) {
@@ -169,48 +169,60 @@ export async function analyzeCommunity(
     const questions = (raw.questions as unknown[]).slice(0, 50);
     const importantIssues = (raw.importantIssues as unknown[]).slice(0, 10);
 
-    // Sanitize insight text
-    const insight = String(raw.insight).slice(0, 1000);
+    // Validate insight is a non-empty string
+    const insight = validateString(raw.insight, 1000);
+    if (insight === null) {
+      logger.error(SCOPE, "Gemini insight is not a string");
+      return null;
+    }
 
     // Validate and sanitize topics
+    const VALID_SEVERITIES = new Set(["low", "medium", "high"]);
+
     const sanitizedTopics = topics
-      .filter((t): t is { name: string; messageCount: number; trending: boolean } =>
-        typeof t === "object" && t !== null && typeof (t as Record<string, unknown>).name === "string",
+      .filter((t): t is Record<string, unknown> =>
+        typeof t === "object" && t !== null,
       )
+      .filter((t) => typeof t.name === "string" && t.name.length > 0)
       .map((t) => ({
-        name: String(t.name).slice(0, 100),
-        messageCount: Math.max(1, Math.min(10000, Math.round(Number(t.messageCount) || 1))),
-        trending: Boolean(t.trending),
+        name: (t.name as string).slice(0, 100),
+        messageCount: validatePositiveInt(t.messageCount, 1, 10000),
+        trending: validateStrictBoolean(t.trending, false),
       }));
 
     // Validate and sanitize questions
     const sanitizedQuestions = questions
-      .filter((q): q is { text: string; author: string; channel: string } =>
-        typeof q === "object" && q !== null &&
-        typeof (q as Record<string, unknown>).text === "string" &&
-        typeof (q as Record<string, unknown>).author === "string" &&
-        typeof (q as Record<string, unknown>).channel === "string",
+      .filter((q): q is Record<string, unknown> =>
+        typeof q === "object" && q !== null,
+      )
+      .filter(
+        (q) =>
+          typeof q.text === "string" && q.text.length > 0 &&
+          typeof q.author === "string" && q.author.length > 0 &&
+          typeof q.channel === "string" && q.channel.length > 0,
       )
       .map((q) => ({
-        text: String(q.text).slice(0, 500),
-        author: String(q.author).slice(0, 50),
-        channel: String(q.channel).slice(0, 50),
-        timestamp: typeof (q as Record<string, unknown>).timestamp === "string" ? String((q as Record<string, unknown>).timestamp) : undefined,
-        answered: Boolean((q as Record<string, unknown>).answered),
-        suggestedAnswer: typeof (q as Record<string, unknown>).suggestedAnswer === "string" ? String((q as Record<string, unknown>).suggestedAnswer).slice(0, 500) : undefined,
+        text: (q.text as string).slice(0, 500),
+        author: (q.author as string).slice(0, 50),
+        channel: (q.channel as string).slice(0, 50),
+        timestamp: typeof q.timestamp === "string" ? q.timestamp : undefined,
+        answered: validateStrictBoolean(q.answered, false),
+        suggestedAnswer:
+          typeof q.suggestedAnswer === "string"
+            ? q.suggestedAnswer.slice(0, 500)
+            : undefined,
       }));
 
-    // Validate and sanitize important issues with strict severity validation
-    const VALID_SEVERITIES = new Set(["low", "medium", "high"]);
+    // Validate and sanitize important issues — reject entries with unknown severity
     const sanitizedIssues = importantIssues
-      .filter((i): i is { description: string } =>
-        typeof i === "object" && i !== null && typeof (i as Record<string, unknown>).description === "string",
+      .filter((i): i is Record<string, unknown> =>
+        typeof i === "object" && i !== null,
       )
+      .filter((i) => typeof i.description === "string" && i.description.length > 0)
+      .filter((i) => VALID_SEVERITIES.has(i.severity as string))
       .map((i) => ({
-        description: String(i.description).slice(0, 300),
-        severity: VALID_SEVERITIES.has(String((i as Record<string, unknown>).severity))
-          ? String((i as Record<string, unknown>).severity) as "low" | "medium" | "high"
-          : "low",
+        description: (i.description as string).slice(0, 300),
+        severity: i.severity as "low" | "medium" | "high",
       }));
 
     const analysis: GeminiAnalysisResponse = {
@@ -223,10 +235,10 @@ export async function analyzeCommunity(
     logger.info(SCOPE, `Analysis complete: ${analysis.topics.length} topics, ${analysis.questions.length} questions`);
     return analysis;
   } catch (error) {
-    if (error instanceof Error && error.message.includes("API key")) {
-      logger.error(SCOPE, "Invalid Gemini API key");
-    } else if (error instanceof Error && error.message.includes("timed out")) {
+    if (error instanceof GoogleGenerativeAIAbortError) {
       logger.error(SCOPE, "Gemini request timed out");
+    } else if (error instanceof Error && error.message.includes("API key")) {
+      logger.error(SCOPE, "Invalid Gemini API key");
     } else {
       logger.error(SCOPE, "Gemini analysis failed", error);
     }
@@ -248,26 +260,76 @@ export async function generateHealthExplanation(
 
     const prompt = buildHealthPrompt(scoreBreakdown);
 
-    const result = await Promise.race([
-      model.generateContent(prompt),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Gemini request timed out")), REQUEST_TIMEOUT_MS),
-      ),
-    ]);
+    const result = await model.generateContent(prompt, {
+      timeout: REQUEST_TIMEOUT_MS,
+    });
 
     const text = result.response.text();
     if (!text) return null;
 
     const raw = parseJSON(text);
 
-    if (typeof raw.explanation !== "string") {
+    const explanation = validateString(raw.explanation, 1000);
+    if (explanation === null) {
       logger.error(SCOPE, "Health explanation missing 'explanation' field");
       return null;
     }
 
-    return String(raw.explanation).slice(0, 1000);
+    return explanation;
   } catch (error) {
-    logger.error(SCOPE, "Health explanation generation failed", error);
+    if (error instanceof GoogleGenerativeAIAbortError) {
+      logger.error(SCOPE, "Health explanation request timed out");
+    } else {
+      logger.error(SCOPE, "Health explanation generation failed", error);
+    }
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers — original CommunityPulse implementation.
+// These enforce strict type checking for AI output fields without
+// relying on external validation libraries.
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate that a value is a string and return it truncated to the
+ * given max length. Returns null if the value is not a string or
+ * is empty after trimming.
+ */
+function validateString(value: unknown, maxLength: number): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  return trimmed.slice(0, maxLength);
+}
+
+/**
+ * Validate that a value is a strict boolean (actual `true` or `false`).
+ * Returns the fallback for any non-boolean value.
+ *
+ * This prevents `Boolean("false")` from becoming `true` — only
+ * actual boolean primitives are accepted.
+ */
+function validateStrictBoolean(value: unknown, fallback: boolean): boolean {
+  if (value === true) return true;
+  if (value === false) return false;
+  return fallback;
+}
+
+/**
+ * Validate that a value is a finite positive integer within the
+ * given range. Returns the fallback if validation fails.
+ */
+function validatePositiveInt(
+  value: unknown,
+  min: number,
+  max: number,
+): number {
+  if (typeof value !== "number") return min;
+  if (!Number.isFinite(value)) return min;
+  const rounded = Math.round(value);
+  if (rounded < min) return min;
+  if (rounded > max) return max;
+  return rounded;
 }
