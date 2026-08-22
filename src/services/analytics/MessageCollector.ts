@@ -46,6 +46,68 @@ function dateToSnowflake(date: Date): string {
 }
 
 /**
+ * Maximum messages allowed per single Discord API fetch request.
+ * Discord rejects any value above 100.
+ */
+const DISCORD_FETCH_LIMIT = 100;
+
+/**
+ * Collect recent messages from a single channel, paginating if needed
+ * to collect up to `channelLimit` messages while respecting the time
+ * window. Every individual Discord API request uses limit <= 100.
+ */
+async function fetchChannelMessages(
+  channel: TextChannel,
+  afterSnowflake: string,
+  channelLimit: number,
+  cutoffMs: number,
+): Promise<Message[]> {
+  const collected: Message[] = [];
+  let beforeCursor: string | undefined;
+
+  while (collected.length < channelLimit) {
+    const batchSize = Math.min(DISCORD_FETCH_LIMIT, channelLimit - collected.length);
+
+    const options: { limit: number; after?: string; before?: string } = {
+      limit: batchSize,
+    };
+
+    if (beforeCursor) {
+      // Paginate backwards using the oldest message from the previous page
+      options.before = beforeCursor;
+    } else {
+      // First request: only fetch messages newer than the analysis window
+      options.after = afterSnowflake;
+    }
+
+    const batch = await channel.messages.fetch(options);
+    if (batch.size === 0) break;
+
+    // Sort oldest-first to find the cursor for the next page and to check
+    // whether we've gone past the time window.
+    const sorted = [...batch.values()].sort(
+      (a, b) => a.createdTimestamp - b.createdTimestamp,
+    );
+
+    for (const msg of sorted) {
+      // Stop if this message is older than the analysis window
+      if (msg.createdTimestamp < cutoffMs) break;
+      collected.push(msg);
+    }
+
+    // If the oldest message in this batch is older than the cutoff,
+    // we've exhausted the relevant window.
+    const oldest = sorted[0];
+    if (!oldest || oldest.createdTimestamp < cutoffMs) break;
+
+    // Use the oldest message ID as the cursor for the next page
+    beforeCursor = oldest.id;
+  }
+
+  return collected;
+}
+
+/**
  * Collect recent messages from all accessible text channels in a guild.
  *
  * Returns a bounded `AnalysisInput` ready for AI consumption.
@@ -56,6 +118,7 @@ export async function collectMessages(
 ): Promise<AnalysisInput> {
   const since = new Date(Date.now() - hoursBack * 60 * 60 * 1000);
   const afterSnowflake = dateToSnowflake(since);
+  const cutoffMs = since.getTime();
   const timeRange = `last ${hoursBack} hour${hoursBack === 1 ? "" : "s"}`;
 
   const textChannels = guild.channels.cache.filter(
@@ -76,15 +139,9 @@ export async function collectMessages(
     if (allMessages.length >= MAX_TOTAL_MESSAGES) break;
 
     try {
-      const remaining = MAX_TOTAL_MESSAGES - allMessages.length;
-      const limit = Math.min(MAX_PER_CHANNEL, remaining);
-
-      const messages = await channel.messages.fetch({
-        limit,
-        after: afterSnowflake,
-      });
-
-      allMessages.push(...messages.values());
+      const channelLimit = Math.min(MAX_PER_CHANNEL, MAX_TOTAL_MESSAGES - allMessages.length);
+      const messages = await fetchChannelMessages(channel, afterSnowflake, channelLimit, cutoffMs);
+      allMessages.push(...messages);
     } catch (error) {
       channelsSkipped++;
       logger.warn(
