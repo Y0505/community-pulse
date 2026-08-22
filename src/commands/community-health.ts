@@ -55,7 +55,9 @@ const communityHealthCommand: Command = {
     await context.deferReply(true);
 
     const hoursBack = getAnalysisHours();
-    const result = await runFullAnalysis(context.member.guild, hoursBack);
+    const result = await runFullAnalysis(context.member.guild, hoursBack, {
+      includeHealthExplanation: true,
+    });
 
     if (result.messageCount === 0) {
       await context.editReply({

@@ -139,13 +139,14 @@ const unansweredCommand: Command = {
 
 /** Format an ISO timestamp into a short Discord-friendly display. */
 function formatTimestamp(iso: string): string {
+  if (!iso) return "time unavailable";
   try {
     const date = new Date(iso);
-    if (Number.isNaN(date.getTime())) return "unknown";
+    if (Number.isNaN(date.getTime())) return "time unavailable";
     const epoch = Math.floor(date.getTime() / 1000);
     return `<t:${epoch}:R>`; // Discord relative timestamp (e.g. "2 hours ago")
   } catch {
-    return "unknown";
+    return "time unavailable";
   }
 }
 

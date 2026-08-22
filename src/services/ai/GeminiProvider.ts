@@ -14,10 +14,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { requireGeminiKey } from "../../config/env.js";
 import { logger } from "../../utils/logger.js";
-import type {
-  GeminiAnalysisResponse,
-  GeminiHealthResponse,
-} from "./types.js";
+import type { GeminiAnalysisResponse } from "./types.js";
 
 const SCOPE = "GeminiProvider";
 
@@ -93,9 +90,13 @@ ${scoreBreakdown}`;
 }
 
 /**
- * Parse and validate a Gemini response as JSON with a safety cap.
+ * Parse a Gemini response as JSON with a safety cap.
+ *
+ * Returns the raw parsed object. Callers must validate the shape
+ * before using it — the return type is Record<string, unknown>
+ * to prevent blind trust in the AI output.
  */
-function parseJSON<T>(raw: string): T {
+function parseJSON(raw: string): Record<string, unknown> {
   // Safety: cap response length to prevent memory issues
   const safe = raw.length > MAX_RESPONSE_CHARS ? raw.slice(0, MAX_RESPONSE_CHARS) : raw;
 
@@ -107,8 +108,13 @@ function parseJSON<T>(raw: string): T {
     .trim();
 
   try {
-    return JSON.parse(cleaned) as T;
-  } catch {
+    const parsed: unknown = JSON.parse(cleaned);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("AI response is not a JSON object");
+    }
+    return parsed as Record<string, unknown>;
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("AI response")) throw err;
     logger.error(SCOPE, `Failed to parse JSON response (length: ${cleaned.length})`);
     throw new Error("AI returned invalid JSON. The response could not be parsed.");
   }
@@ -145,59 +151,77 @@ export async function analyzeCommunity(
       return null;
     }
 
-    const parsed = parseJSON<GeminiAnalysisResponse>(text);
+    const raw = parseJSON(text);
 
-    // Validate required fields
+    // Validate required fields exist and have the right types
     if (
-      typeof parsed.insight !== "string" ||
-      !Array.isArray(parsed.topics) ||
-      !Array.isArray(parsed.questions) ||
-      !Array.isArray(parsed.importantIssues)
+      typeof raw.insight !== "string" ||
+      !Array.isArray(raw.topics) ||
+      !Array.isArray(raw.questions) ||
+      !Array.isArray(raw.importantIssues)
     ) {
       logger.error(SCOPE, "Gemini response missing required fields");
       return null;
     }
 
     // Clamp arrays to reasonable sizes
-    parsed.topics = parsed.topics.slice(0, 10);
-    parsed.questions = parsed.questions.slice(0, 50);
-    parsed.importantIssues = parsed.importantIssues.slice(0, 10);
+    const topics = (raw.topics as unknown[]).slice(0, 10);
+    const questions = (raw.questions as unknown[]).slice(0, 50);
+    const importantIssues = (raw.importantIssues as unknown[]).slice(0, 10);
 
     // Sanitize insight text
-    parsed.insight = parsed.insight.slice(0, 1000);
+    const insight = String(raw.insight).slice(0, 1000);
 
     // Validate and sanitize topics
-    parsed.topics = parsed.topics
-      .filter((t) => typeof t.name === "string")
+    const sanitizedTopics = topics
+      .filter((t): t is { name: string; messageCount: number; trending: boolean } =>
+        typeof t === "object" && t !== null && typeof (t as Record<string, unknown>).name === "string",
+      )
       .map((t) => ({
-        name: t.name.slice(0, 100),
+        name: String(t.name).slice(0, 100),
         messageCount: Math.max(1, Math.min(10000, Math.round(Number(t.messageCount) || 1))),
         trending: Boolean(t.trending),
       }));
 
     // Validate and sanitize questions
-    parsed.questions = parsed.questions
-      .filter((q) => typeof q.text === "string" && typeof q.author === "string" && typeof q.channel === "string")
+    const sanitizedQuestions = questions
+      .filter((q): q is { text: string; author: string; channel: string } =>
+        typeof q === "object" && q !== null &&
+        typeof (q as Record<string, unknown>).text === "string" &&
+        typeof (q as Record<string, unknown>).author === "string" &&
+        typeof (q as Record<string, unknown>).channel === "string",
+      )
       .map((q) => ({
-        text: q.text.slice(0, 500),
-        author: q.author.slice(0, 50),
-        channel: q.channel.slice(0, 50),
-        timestamp: typeof q.timestamp === "string" ? q.timestamp : undefined,
-        answered: Boolean(q.answered),
-        suggestedAnswer: typeof q.suggestedAnswer === "string" ? q.suggestedAnswer.slice(0, 500) : undefined,
+        text: String(q.text).slice(0, 500),
+        author: String(q.author).slice(0, 50),
+        channel: String(q.channel).slice(0, 50),
+        timestamp: typeof (q as Record<string, unknown>).timestamp === "string" ? String((q as Record<string, unknown>).timestamp) : undefined,
+        answered: Boolean((q as Record<string, unknown>).answered),
+        suggestedAnswer: typeof (q as Record<string, unknown>).suggestedAnswer === "string" ? String((q as Record<string, unknown>).suggestedAnswer).slice(0, 500) : undefined,
       }));
 
     // Validate and sanitize important issues with strict severity validation
     const VALID_SEVERITIES = new Set(["low", "medium", "high"]);
-    parsed.importantIssues = parsed.importantIssues
-      .filter((i) => typeof i.description === "string")
+    const sanitizedIssues = importantIssues
+      .filter((i): i is { description: string } =>
+        typeof i === "object" && i !== null && typeof (i as Record<string, unknown>).description === "string",
+      )
       .map((i) => ({
-        description: i.description.slice(0, 300),
-        severity: VALID_SEVERITIES.has(i.severity) ? i.severity : "low",
+        description: String(i.description).slice(0, 300),
+        severity: VALID_SEVERITIES.has(String((i as Record<string, unknown>).severity))
+          ? String((i as Record<string, unknown>).severity) as "low" | "medium" | "high"
+          : "low",
       }));
 
-    logger.info(SCOPE, `Analysis complete: ${parsed.topics.length} topics, ${parsed.questions.length} questions`);
-    return parsed;
+    const analysis: GeminiAnalysisResponse = {
+      insight,
+      topics: sanitizedTopics,
+      questions: sanitizedQuestions,
+      importantIssues: sanitizedIssues,
+    };
+
+    logger.info(SCOPE, `Analysis complete: ${analysis.topics.length} topics, ${analysis.questions.length} questions`);
+    return analysis;
   } catch (error) {
     if (error instanceof Error && error.message.includes("API key")) {
       logger.error(SCOPE, "Invalid Gemini API key");
@@ -234,14 +258,14 @@ export async function generateHealthExplanation(
     const text = result.response.text();
     if (!text) return null;
 
-    const parsed = parseJSON<GeminiHealthResponse>(text);
+    const raw = parseJSON(text);
 
-    if (typeof parsed.explanation !== "string") {
+    if (typeof raw.explanation !== "string") {
       logger.error(SCOPE, "Health explanation missing 'explanation' field");
       return null;
     }
 
-    return parsed.explanation.slice(0, 1000);
+    return String(raw.explanation).slice(0, 1000);
   } catch (error) {
     logger.error(SCOPE, "Health explanation generation failed", error);
     return null;

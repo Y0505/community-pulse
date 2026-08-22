@@ -15,6 +15,12 @@ import { logger } from "../../utils/logger.js";
 
 const SCOPE = "CommunityAnalyzer";
 
+/** Options controlling which AI work is performed. */
+export interface AnalysisOptions {
+  /** Generate an AI health explanation. Only needed by /community-health. */
+  includeHealthExplanation?: boolean;
+}
+
 /** Result of a full community analysis pass. */
 export interface FullAnalysis {
   /** The AI-generated community analysis. */
@@ -36,7 +42,7 @@ export interface FullAnalysis {
  * 1. Collect bounded messages from all accessible channels.
  * 2. Send to Gemini for structured analysis.
  * 3. Calculate deterministic health score.
- * 4. Generate AI health explanation.
+ * 4. (Optional) Generate AI health explanation.
  *
  * Returns a complete result even if the AI fails — health scores
  * are always deterministic.
@@ -44,6 +50,7 @@ export interface FullAnalysis {
 export async function runFullAnalysis(
   guild: Guild,
   hoursBack: number,
+  options: AnalysisOptions = {},
 ): Promise<FullAnalysis> {
   logger.info(SCOPE, `Starting full analysis for guild ${guild.id} (${hoursBack}h)`);
 
@@ -87,8 +94,8 @@ export async function runFullAnalysis(
     input,
   });
 
-  // Step 4: AI health explanation (non-critical)
-  if (aiAvailable) {
+  // Step 4: AI health explanation (non-critical, only when explicitly requested)
+  if (options.includeHealthExplanation && aiAvailable) {
     const breakdown = formatScoreForAI(health, {
       messageCount: input.messageCount,
       memberCount: guild.memberCount,
@@ -159,7 +166,11 @@ export async function runFullAnalysis(
 /**
  * Attempt to find a timestamp for a question by matching it against
  * collected messages. Uses simple substring matching — not perfect,
- * but better than having no timestamp at all.
+ * but better than fabricating a timestamp.
+ *
+ * Returns the ISO timestamp of the matching message, or an empty string
+ * if no reliable match is found. The UI must handle empty timestamps
+ * gracefully.
  */
 function findTimestamp(
   questionText: string,
@@ -174,11 +185,41 @@ function findTimestamp(
       return msg.timestamp;
     }
   }
-  return new Date().toISOString();
+  // Return empty string rather than fabricating a timestamp.
+  return "";
 }
 
-/** Common patterns that indicate a response to a question. */
-const RESPONSE_INDICATORS = /^(yes|no|check|try|look|see|here|sure|use|go to|see the|read the| documentation| docs)/i;
+/**
+ * Patterns that indicate a message is likely a response to a preceding question.
+ * These are intentionally broad to catch common response patterns without
+ * creating a complex NLP pipeline. The AI remains the primary classifier;
+ * this is a lightweight safety net.
+ */
+const RESPONSE_PATTERNS = [
+  // Direct answer starters
+  /^(yes|no|maybe|sure|nope|nah|yep|yeah)/i,
+  // Documentation / reference pointers
+  /^(check|try|look|see|read|go to|visit|use|follow)/i,
+  /^(docs?|documentation|here\s+is|here's|here are|here's a)/i,
+  // Explanatory replies
+  /^(you can|you should|you need to|you have to|you may)/i,
+  /^(it's|its|this is|that's|the reason|because|basically)/i,
+  // Confirmation and acknowledgment
+  /^(done|fixed|solved|resolved|working|works|confirmed|agreed|thanks)/i,
+  // Technical answers
+  /^(install|configure|set up|setup|update|upgrade|run|execute)/i,
+  /^(error|issue|problem|bug|crash|failed|failing)/i,
+  // Link-like responses (just a URL or channel reference)
+  /^(https?:\/\/|<#[\w]+>|<@[\w]+>)/i,
+];
+
+/** Check whether a message looks like a response to a question. */
+function looksLikeResponse(text: string): boolean {
+  const trimmed = text.trim();
+  // Very short messages (1-3 words) are often acknowledgments
+  if (trimmed.split(/\s+/).length <= 3 && trimmed.length > 1) return true;
+  return RESPONSE_PATTERNS.some((p) => p.test(trimmed));
+}
 
 /**
  * Local heuristic: re-evaluate whether a question is truly unanswered.
@@ -186,7 +227,7 @@ const RESPONSE_INDICATORS = /^(yes|no|check|try|look|see|here|sure|use|go to|see
  * After the AI classifies questions, this checks the surrounding
  * messages for responses that the AI might have missed. A question
  * is considered answered if a message from a *different* author
- * follows it within 3 messages and starts with a response pattern.
+ * follows it within 3 messages and looks like a response.
  *
  * This is a lightweight safety net — it doesn't replace the AI
  * classification but catches obvious missed responses.
@@ -211,7 +252,7 @@ function refineUnansweredStatus(
     // Check the next 3 messages for a response from a different author
     const nearby = channelMessages.slice(qIndex + 1, qIndex + 4);
     for (const msg of nearby) {
-      if (msg.author !== q.author && RESPONSE_INDICATORS.test(msg.text.trim())) {
+      if (msg.author !== q.author && looksLikeResponse(msg.text)) {
         return { ...q, answered: true };
       }
     }

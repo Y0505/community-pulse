@@ -135,8 +135,12 @@ function formatTime(timestamp: number): string {
 }
 
 /**
- * Format an AnalysisInput into a concise text block for the AI prompt.
- * Keeps token count manageable by summarizing rather than listing every message.
+ * Format an AnalysisInput into a text block for the AI prompt.
+ *
+ * Groups messages by channel and includes up to 50 messages per channel.
+ * This keeps AI input bounded even when the collector gathered 2,000 total
+ * messages. Excess messages beyond the per-channel cap are noted with a
+ * count so the AI knows additional context exists.
  */
 export function formatForAI(input: AnalysisInput): string {
   const lines: string[] = [
