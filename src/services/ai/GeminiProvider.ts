@@ -134,7 +134,7 @@ export async function analyzeCommunity(
 ): Promise<GeminiAnalysisResponse | null> {
   try {
     const genAI = getClient();
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-3.6-flash" });
 
     const prompt = buildAnalysisPrompt(inputSummary);
 
@@ -256,7 +256,7 @@ export async function generateHealthExplanation(
 ): Promise<string | null> {
   try {
     const genAI = getClient();
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-3.6-flash" });
 
     const prompt = buildHealthPrompt(scoreBreakdown);
 
