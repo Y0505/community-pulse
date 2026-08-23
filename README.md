@@ -290,6 +290,41 @@ Third-party dependencies remain subject to their respective licenses. Use them a
 
 ---
 
+## Contributing
+
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to contribute, set up your development environment, and submit pull requests.
+
+---
+
+## Security
+
+For reporting security vulnerabilities, please see [SECURITY.md](SECURITY.md). Do not open public GitHub issues for security-related concerns.
+
+---
+
+## Code of Conduct
+
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). By participating, you agree to uphold its standards.
+
+---
+
+## Third-Party Services
+
+CommunityPulse integrates with external services. Users deploying their own instance are responsible for:
+
+- Obtaining their own API credentials
+- Complying with the applicable terms of service for each provider
+- Understanding the privacy implications of sending data to external APIs
+
+| Service | Purpose | Terms |
+|---|---|---|
+| [Discord API](https://discord.com/developers/docs) | Bot runtime, message access | [Discord Terms of Service](https://discord.com/terms) |
+| [Google Gemini API](https://ai.google.dev/) | AI-powered community analysis | [Google AI Terms](https://ai.google.dev/terms) |
+
+The CommunityPulse source code is licensed under MIT. The Discord and Gemini APIs are separate services with their own terms and pricing.
+
+---
+
 ## Roadmap
 
 ### Phase 1 — Bot Core & Intelligence *(current)*
@@ -324,4 +359,6 @@ Third-party dependencies remain subject to their respective licenses. Use them a
 
 This project is licensed under the [MIT License](LICENSE).
 
-Application code is original and project-specific. Third-party dependencies remain subject to their respective licenses.
+Copyright (c) 2026 Yaser Montazeri.
+
+Application code is original and project-specific. Third-party dependencies remain subject to their respective licenses. Use them according to their license terms.

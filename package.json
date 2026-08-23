@@ -19,7 +19,7 @@
     "community",
     "typescript"
   ],
-  "author": "CommunityPulse Contributors",
+  "author": "Yaser Montazeri",
   "license": "MIT",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
