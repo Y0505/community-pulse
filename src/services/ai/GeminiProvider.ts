@@ -11,7 +11,7 @@
  * - Timeout management
  */
 
-import { GoogleGenerativeAI, GoogleGenerativeAIAbortError } from "@google/generative-ai";
+import { GoogleGenerativeAI, GoogleGenerativeAIAbortError, GoogleGenerativeAIFetchError } from "@google/generative-ai";
 import { requireGeminiKey } from "../../config/env.js";
 import { logger } from "../../utils/logger.js";
 import type { GeminiAnalysisResponse } from "./types.js";
@@ -23,6 +23,18 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 /** Maximum response length to prevent unbounded data. */
 const MAX_RESPONSE_CHARS = 50_000;
+
+/** Maximum retry attempts for temporary Gemini failures. */
+const MAX_RETRIES = 3;
+
+/** Base delay for exponential backoff in milliseconds. */
+const BASE_DELAY_MS = 1_000;
+
+/**
+ * HTTP status codes that indicate a temporary failure worth retrying.
+ * 429 = rate limited, 500/502/503/504 = server-side issues.
+ */
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 
 /**
  * Initialize the Gemini client. Called lazily on first use so the bot
@@ -121,6 +133,43 @@ function parseJSON(raw: string): Record<string, unknown> {
 }
 
 // ---------------------------------------------------------------------------
+// Retry helpers — original CommunityPulse implementation.
+// Determines whether an error is temporary and worth retrying, and
+// provides exponential backoff between attempts.
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when the error indicates a temporary failure that
+ * may succeed on a subsequent attempt.
+ *
+ * Retried:
+ *  - GoogleGenerativeAIFetchError with HTTP 429, 500, 502, 503, 504
+ *  - Generic network errors (TypeError from failed fetch, etc.)
+ *
+ * NOT retried:
+ *  - GoogleGenerativeAIAbortError (timeout)
+ *  - GoogleGenerativeAIRequestInputError (bad request / invalid key)
+ *  - GoogleGenerativeAIResponseError (malformed response)
+ *  - Any HTTP 4xx error (client-side, permanent)
+ */
+function isRetryableError(error: unknown): boolean {
+  // SDK HTTP errors — check the status code
+  if (error instanceof GoogleGenerativeAIFetchError) {
+    return typeof error.status === "number" && RETRYABLE_STATUS_CODES.has(error.status);
+  }
+  // Generic TypeError is typically a network-level failure (DNS, connection refused, etc.)
+  if (error instanceof TypeError) {
+    return true;
+  }
+  return false;
+}
+
+/** Native sleep using a Promise. No third-party dependency. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -132,118 +181,140 @@ function parseJSON(raw: string): Record<string, unknown> {
 export async function analyzeCommunity(
   inputSummary: string,
 ): Promise<GeminiAnalysisResponse | null> {
-  try {
-    const genAI = getClient();
-    const model = genAI.getGenerativeModel({ model: "gemini-3.6-flash" });
+  const genAI = getClient();
+  const model = genAI.getGenerativeModel({ model: "gemini-3.6-flash" });
+  const prompt = buildAnalysisPrompt(inputSummary);
 
-    const prompt = buildAnalysisPrompt(inputSummary);
+  // Retry loop for temporary failures (503, 429, network errors).
+  // Permanent errors (bad key, invalid request) are not retried.
+  let lastError: unknown = null;
 
-    // Use the SDK's built-in timeout rather than Promise.race.
-    // The SDK creates an AbortController internally and cancels the
-    // fetch when the timeout fires.
-    const result = await model.generateContent(prompt, {
-      timeout: REQUEST_TIMEOUT_MS,
-    });
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      logger.info(SCOPE, `Gemini analysis request (attempt ${attempt}/${MAX_RETRIES})`);
 
-    const text = result.response.text();
-    if (!text) {
-      logger.error(SCOPE, "Gemini returned empty response");
-      return null;
+      const result = await model.generateContent(prompt, {
+        timeout: REQUEST_TIMEOUT_MS,
+      });
+
+      const text = result.response.text();
+      if (!text) {
+        logger.error(SCOPE, "Gemini returned empty response");
+        return null;
+      }
+
+      const raw = parseJSON(text);
+
+      // Validate required fields exist and have the right types
+      if (
+        typeof raw.insight !== "string" ||
+        !Array.isArray(raw.topics) ||
+        !Array.isArray(raw.questions) ||
+        !Array.isArray(raw.importantIssues)
+      ) {
+        logger.error(SCOPE, "Gemini response missing required fields");
+        return null;
+      }
+
+      // Clamp arrays to reasonable sizes
+      const topics = (raw.topics as unknown[]).slice(0, 10);
+      const questions = (raw.questions as unknown[]).slice(0, 50);
+      const importantIssues = (raw.importantIssues as unknown[]).slice(0, 10);
+
+      // Validate insight is a non-empty string
+      const insight = validateString(raw.insight, 1000);
+      if (insight === null) {
+        logger.error(SCOPE, "Gemini insight is not a string");
+        return null;
+      }
+
+      // Validate and sanitize topics
+      const VALID_SEVERITIES = new Set(["low", "medium", "high"]);
+
+      const sanitizedTopics = topics
+        .filter((t): t is Record<string, unknown> =>
+          typeof t === "object" && t !== null,
+        )
+        .filter((t) => typeof t.name === "string" && t.name.length > 0)
+        .map((t) => ({
+          name: (t.name as string).slice(0, 100),
+          messageCount: validatePositiveInt(t.messageCount, 1, 10000),
+          trending: validateStrictBoolean(t.trending, false),
+        }));
+
+      // Validate and sanitize questions
+      const sanitizedQuestions = questions
+        .filter((q): q is Record<string, unknown> =>
+          typeof q === "object" && q !== null,
+        )
+        .filter(
+          (q) =>
+            typeof q.text === "string" && q.text.length > 0 &&
+            typeof q.author === "string" && q.author.length > 0 &&
+            typeof q.channel === "string" && q.channel.length > 0,
+        )
+        .map((q) => ({
+          text: (q.text as string).slice(0, 500),
+          author: (q.author as string).slice(0, 50),
+          channel: (q.channel as string).slice(0, 50),
+          timestamp: typeof q.timestamp === "string" ? q.timestamp : undefined,
+          answered: validateStrictBoolean(q.answered, false),
+          suggestedAnswer:
+            typeof q.suggestedAnswer === "string"
+              ? q.suggestedAnswer.slice(0, 500)
+              : undefined,
+        }));
+
+      // Validate and sanitize important issues — reject entries with unknown severity
+      const sanitizedIssues = importantIssues
+        .filter((i): i is Record<string, unknown> =>
+          typeof i === "object" && i !== null,
+        )
+        .filter((i) => typeof i.description === "string" && i.description.length > 0)
+        .filter((i) => VALID_SEVERITIES.has(i.severity as string))
+        .map((i) => ({
+          description: (i.description as string).slice(0, 300),
+          severity: i.severity as "low" | "medium" | "high",
+        }));
+
+      const analysis: GeminiAnalysisResponse = {
+        insight,
+        topics: sanitizedTopics,
+        questions: sanitizedQuestions,
+        importantIssues: sanitizedIssues,
+      };
+
+      logger.info(SCOPE, `Analysis complete: ${analysis.topics.length} topics, ${analysis.questions.length} questions`);
+      return analysis;
+    } catch (error) {
+      lastError = error;
+
+      // Non-retryable: timeout, bad request, invalid key, malformed response
+      if (error instanceof GoogleGenerativeAIAbortError) {
+        logger.error(SCOPE, `Gemini request timed out (attempt ${attempt}/${MAX_RETRIES})`);
+        return null; // timeout won't improve on retry
+      }
+      if (error instanceof Error && error.message.includes("API key")) {
+        logger.error(SCOPE, "Invalid Gemini API key");
+        return null; // auth errors won't improve on retry
+      }
+      if (!isRetryableError(error)) {
+        logger.error(SCOPE, `Gemini analysis failed with non-retryable error (attempt ${attempt}/${MAX_RETRIES})`, error);
+        return null;
+      }
+
+      // Retryable: log and back off
+      if (attempt < MAX_RETRIES) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        logger.warn(SCOPE, `Temporary Gemini failure on attempt ${attempt}/${MAX_RETRIES}, retrying in ${delay}ms...`);
+        await sleep(delay);
+      }
     }
-
-    const raw = parseJSON(text);
-
-    // Validate required fields exist and have the right types
-    if (
-      typeof raw.insight !== "string" ||
-      !Array.isArray(raw.topics) ||
-      !Array.isArray(raw.questions) ||
-      !Array.isArray(raw.importantIssues)
-    ) {
-      logger.error(SCOPE, "Gemini response missing required fields");
-      return null;
-    }
-
-    // Clamp arrays to reasonable sizes
-    const topics = (raw.topics as unknown[]).slice(0, 10);
-    const questions = (raw.questions as unknown[]).slice(0, 50);
-    const importantIssues = (raw.importantIssues as unknown[]).slice(0, 10);
-
-    // Validate insight is a non-empty string
-    const insight = validateString(raw.insight, 1000);
-    if (insight === null) {
-      logger.error(SCOPE, "Gemini insight is not a string");
-      return null;
-    }
-
-    // Validate and sanitize topics
-    const VALID_SEVERITIES = new Set(["low", "medium", "high"]);
-
-    const sanitizedTopics = topics
-      .filter((t): t is Record<string, unknown> =>
-        typeof t === "object" && t !== null,
-      )
-      .filter((t) => typeof t.name === "string" && t.name.length > 0)
-      .map((t) => ({
-        name: (t.name as string).slice(0, 100),
-        messageCount: validatePositiveInt(t.messageCount, 1, 10000),
-        trending: validateStrictBoolean(t.trending, false),
-      }));
-
-    // Validate and sanitize questions
-    const sanitizedQuestions = questions
-      .filter((q): q is Record<string, unknown> =>
-        typeof q === "object" && q !== null,
-      )
-      .filter(
-        (q) =>
-          typeof q.text === "string" && q.text.length > 0 &&
-          typeof q.author === "string" && q.author.length > 0 &&
-          typeof q.channel === "string" && q.channel.length > 0,
-      )
-      .map((q) => ({
-        text: (q.text as string).slice(0, 500),
-        author: (q.author as string).slice(0, 50),
-        channel: (q.channel as string).slice(0, 50),
-        timestamp: typeof q.timestamp === "string" ? q.timestamp : undefined,
-        answered: validateStrictBoolean(q.answered, false),
-        suggestedAnswer:
-          typeof q.suggestedAnswer === "string"
-            ? q.suggestedAnswer.slice(0, 500)
-            : undefined,
-      }));
-
-    // Validate and sanitize important issues — reject entries with unknown severity
-    const sanitizedIssues = importantIssues
-      .filter((i): i is Record<string, unknown> =>
-        typeof i === "object" && i !== null,
-      )
-      .filter((i) => typeof i.description === "string" && i.description.length > 0)
-      .filter((i) => VALID_SEVERITIES.has(i.severity as string))
-      .map((i) => ({
-        description: (i.description as string).slice(0, 300),
-        severity: i.severity as "low" | "medium" | "high",
-      }));
-
-    const analysis: GeminiAnalysisResponse = {
-      insight,
-      topics: sanitizedTopics,
-      questions: sanitizedQuestions,
-      importantIssues: sanitizedIssues,
-    };
-
-    logger.info(SCOPE, `Analysis complete: ${analysis.topics.length} topics, ${analysis.questions.length} questions`);
-    return analysis;
-  } catch (error) {
-    if (error instanceof GoogleGenerativeAIAbortError) {
-      logger.error(SCOPE, "Gemini request timed out");
-    } else if (error instanceof Error && error.message.includes("API key")) {
-      logger.error(SCOPE, "Invalid Gemini API key");
-    } else {
-      logger.error(SCOPE, "Gemini analysis failed", error);
-    }
-    return null;
   }
+
+  // All retry attempts exhausted
+  logger.error(SCOPE, `Gemini analysis failed after ${MAX_RETRIES} attempts, falling back to raw stats`, lastError);
+  return null;
 }
 
 /**
@@ -254,36 +325,58 @@ export async function analyzeCommunity(
 export async function generateHealthExplanation(
   scoreBreakdown: string,
 ): Promise<string | null> {
-  try {
-    const genAI = getClient();
-    const model = genAI.getGenerativeModel({ model: "gemini-3.6-flash" });
+  const genAI = getClient();
+  const model = genAI.getGenerativeModel({ model: "gemini-3.6-flash" });
+  const prompt = buildHealthPrompt(scoreBreakdown);
 
-    const prompt = buildHealthPrompt(scoreBreakdown);
+  let lastError: unknown = null;
 
-    const result = await model.generateContent(prompt, {
-      timeout: REQUEST_TIMEOUT_MS,
-    });
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      logger.info(SCOPE, `Gemini health explanation request (attempt ${attempt}/${MAX_RETRIES})`);
 
-    const text = result.response.text();
-    if (!text) return null;
+      const result = await model.generateContent(prompt, {
+        timeout: REQUEST_TIMEOUT_MS,
+      });
 
-    const raw = parseJSON(text);
+      const text = result.response.text();
+      if (!text) return null;
 
-    const explanation = validateString(raw.explanation, 1000);
-    if (explanation === null) {
-      logger.error(SCOPE, "Health explanation missing 'explanation' field");
-      return null;
+      const raw = parseJSON(text);
+
+      const explanation = validateString(raw.explanation, 1000);
+      if (explanation === null) {
+        logger.error(SCOPE, "Health explanation missing 'explanation' field");
+        return null;
+      }
+
+      return explanation;
+    } catch (error) {
+      lastError = error;
+
+      if (error instanceof GoogleGenerativeAIAbortError) {
+        logger.error(SCOPE, `Health explanation request timed out (attempt ${attempt}/${MAX_RETRIES})`);
+        return null;
+      }
+      if (error instanceof Error && error.message.includes("API key")) {
+        logger.error(SCOPE, "Invalid Gemini API key");
+        return null;
+      }
+      if (!isRetryableError(error)) {
+        logger.error(SCOPE, `Health explanation failed with non-retryable error (attempt ${attempt}/${MAX_RETRIES})`, error);
+        return null;
+      }
+
+      if (attempt < MAX_RETRIES) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        logger.warn(SCOPE, `Temporary failure on health explanation attempt ${attempt}/${MAX_RETRIES}, retrying in ${delay}ms...`);
+        await sleep(delay);
+      }
     }
-
-    return explanation;
-  } catch (error) {
-    if (error instanceof GoogleGenerativeAIAbortError) {
-      logger.error(SCOPE, "Health explanation request timed out");
-    } else {
-      logger.error(SCOPE, "Health explanation generation failed", error);
-    }
-    return null;
   }
+
+  logger.error(SCOPE, `Health explanation failed after ${MAX_RETRIES} attempts`, lastError);
+  return null;
 }
 
 // ---------------------------------------------------------------------------
