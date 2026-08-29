@@ -68,9 +68,10 @@ The JSON must have this exact structure:
 
 Rules:
 - "topics" should list the 3-8 main discussion themes.
-- "questions" should list actual questions found in messages. Mark "answered" true only if someone gave a substantive reply.
+- "questions" — Extract EVERY explicit question found in the messages as a separate question object. A message is a question if it asks something, seeks information, or requests help — even if it is short or casual. Do NOT limit the number of questions returned. Do NOT merge similar questions. Do NOT select only the most important questions. If 15 messages contain questions, return 15 question objects.
+- Mark "answered" true only if someone gave a substantive reply from a different author.
 - "suggestedAnswer" should only be included for unanswered questions.
-- "importantIssues" should highlight problems, complaints, or urgent needs.
+- "importantIssues" should highlight problems, complaints, or urgent needs. Do NOT put questions here — questions go in the "questions" array.
 - "trending" means the topic appears to be gaining momentum.
 - Keep all text concise (under 200 chars per field).
 - Do NOT include user IDs, email addresses, or private information.
