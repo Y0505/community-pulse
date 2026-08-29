@@ -143,16 +143,22 @@ function parseJSON(raw: string): Record<string, unknown> {
  * may succeed on a subsequent attempt.
  *
  * Retried:
+ *  - GoogleGenerativeAIAbortError (request timeout — the service may
+ *    respond if given another attempt after a short delay)
  *  - GoogleGenerativeAIFetchError with HTTP 429, 500, 502, 503, 504
  *  - Generic network errors (TypeError from failed fetch, etc.)
  *
  * NOT retried:
- *  - GoogleGenerativeAIAbortError (timeout)
  *  - GoogleGenerativeAIRequestInputError (bad request / invalid key)
  *  - GoogleGenerativeAIResponseError (malformed response)
  *  - Any HTTP 4xx error (client-side, permanent)
  */
 function isRetryableError(error: unknown): boolean {
+  // Timeout — the Gemini service was slow or temporarily overloaded.
+  // Worth retrying with backoff.
+  if (error instanceof GoogleGenerativeAIAbortError) {
+    return true;
+  }
   // SDK HTTP errors — check the status code
   if (error instanceof GoogleGenerativeAIFetchError) {
     return typeof error.status === "number" && RETRYABLE_STATUS_CODES.has(error.status);
@@ -289,24 +295,24 @@ export async function analyzeCommunity(
     } catch (error) {
       lastError = error;
 
-      // Non-retryable: timeout, bad request, invalid key, malformed response
-      if (error instanceof GoogleGenerativeAIAbortError) {
-        logger.error(SCOPE, `Gemini request timed out (attempt ${attempt}/${MAX_RETRIES})`);
-        return null; // timeout won't improve on retry
-      }
+      // Non-retryable: invalid API key, malformed request, etc.
       if (error instanceof Error && error.message.includes("API key")) {
-        logger.error(SCOPE, "Invalid Gemini API key");
-        return null; // auth errors won't improve on retry
+        logger.error(SCOPE, "Invalid Gemini API key — not retrying");
+        return null;
       }
       if (!isRetryableError(error)) {
         logger.error(SCOPE, `Gemini analysis failed with non-retryable error (attempt ${attempt}/${MAX_RETRIES})`, error);
         return null;
       }
 
-      // Retryable: log and back off
-      if (attempt < MAX_RETRIES) {
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      // Retryable: timeout (429, 5xx, network error). Back off and retry.
+      const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      if (error instanceof GoogleGenerativeAIAbortError) {
+        logger.warn(SCOPE, `Gemini request timed out (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms...`);
+      } else {
         logger.warn(SCOPE, `Temporary Gemini failure on attempt ${attempt}/${MAX_RETRIES}, retrying in ${delay}ms...`);
+      }
+      if (attempt < MAX_RETRIES) {
         await sleep(delay);
       }
     }
@@ -354,12 +360,8 @@ export async function generateHealthExplanation(
     } catch (error) {
       lastError = error;
 
-      if (error instanceof GoogleGenerativeAIAbortError) {
-        logger.error(SCOPE, `Health explanation request timed out (attempt ${attempt}/${MAX_RETRIES})`);
-        return null;
-      }
       if (error instanceof Error && error.message.includes("API key")) {
-        logger.error(SCOPE, "Invalid Gemini API key");
+        logger.error(SCOPE, "Invalid Gemini API key — not retrying");
         return null;
       }
       if (!isRetryableError(error)) {
@@ -367,9 +369,13 @@ export async function generateHealthExplanation(
         return null;
       }
 
-      if (attempt < MAX_RETRIES) {
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      if (error instanceof GoogleGenerativeAIAbortError) {
+        logger.warn(SCOPE, `Health explanation timed out (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms...`);
+      } else {
         logger.warn(SCOPE, `Temporary failure on health explanation attempt ${attempt}/${MAX_RETRIES}, retrying in ${delay}ms...`);
+      }
+      if (attempt < MAX_RETRIES) {
         await sleep(delay);
       }
     }
